@@ -30,9 +30,10 @@ class AdtSolver(k: Int) {
 
 //  protected val eqClassMap = new mutable.HashMap[Expr, Option[Expr]]
 //  protected val edgeMap = new mutable.HashMap[Expr, ArrayBuffer[Expr]]
-  protected val parentMap = new mutable.HashMap[Vertex, Vertex]
+//  protected val parentMap = new mutable.HashMap[Vertex, Vertex]
   protected val edgeMap = new mutable.HashMap[Vertex, ArrayBuffer[Vertex]]
   protected val exprMap = new mutable.HashMap[Expr, Vertex]
+  protected val reachSet = new mutable.HashSet[(Vertex, Vertex)]
 
   def solve(eqs: Seq[(Expr, Expr)], iqs: Seq[(Expr, Expr)]): Boolean = {
 
@@ -54,19 +55,29 @@ class AdtSolver(k: Int) {
 //      a
 //    }
 
-    // TODO: What we want is a check whether a and b lie in the same weakly connected
-    //  component. Can we solve this efficiently by means of union-find?
-    //  If so, our problem with multiple parents below would be solved as well.
+//    // TODO: What we want is a check whether a and b lie in the same weakly connected
+//    //  component. Can we solve this efficiently by means of union-find?
+//    //  If so, our problem with multiple parents below would be solved as well.
+//    def isReachableFrom(a: Vertex, b: Vertex): Boolean = {
+//      if (a == b)
+//        return true
+//      parentMap.get(a) match {
+//        case None => false
+//        case Some(parent) => isReachableFrom(parent, b)
+//      }
+//    }
+    // NOTE: This is in O(n), i.e. our overall bottleneck.
+    //  Terminates if the graph is acyclic.
     def isReachableFrom(a: Vertex, b: Vertex): Boolean = {
       if (a == b)
         return true
-      parentMap.get(a) match {
+      edgeMap.get(b) match {
         case None => false
-        case Some(parent) => isReachableFrom(parent, b)
+        case Some(children) => children exists (isReachableFrom(a,_))
       }
     }
 
-    // Merges Vertices a and b.
+    // Merges Vertex b into Vertex a.
     //  Returns the remaining Vertex if successful and
     //  returns None if the merge would create a cycle.
     def merge(a: Vertex, b: Vertex): Option[Vertex] = {
@@ -78,7 +89,7 @@ class AdtSolver(k: Int) {
 
       // Merge b into a
       a.labels ++= b.labels
-      parentMap.remove(b)
+//      parentMap.remove(b)
       edgeMap.remove(b)
       b.labels foreach { expr => exprMap.put(expr, a) }
 
@@ -101,7 +112,15 @@ class AdtSolver(k: Int) {
     // Computes the congruence closure of the given internal graph.
     //  Returns true on success and false if cycles are introduced.
     def computeCongruenceClosure(): Boolean = {
-
+      // Consider graph G' which is the internal graph with all its edges
+      // inverted.
+      // Then we want to iterate over the vertices in G' in topologically
+      // sorted order.
+      // For any vertex we encounter that has more than a single parent,
+      //  while that vertex and all of its siblings have two parents in common
+      //    we merge those two parents.
+      // NOTE: The vertex removed by the merge needs to ignored in the
+      // topological iteration.
     }
 
     // Adds expr to the internal graph
@@ -154,7 +173,7 @@ class AdtSolver(k: Int) {
           children(index).labels += expr
         case Constructor(args) =>
           val children = args map registerExpr
-          children foreach { child => parentMap.put(child, vertex) }
+//          children foreach { child => parentMap.put(child, vertex) }
           edgeMap.put(vertex, new ArrayBuffer[Vertex](k) ++= children)
       }
 
@@ -163,10 +182,11 @@ class AdtSolver(k: Int) {
 
     // Reset internal state
 
-    parentMap.clear()
+//    parentMap.clear()
     edgeMap.clear()
 //    eqClassMap.clear()
     exprMap.clear()
+    reachSet.clear()
 
     // Actual algorithm
 
