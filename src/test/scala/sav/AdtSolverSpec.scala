@@ -26,9 +26,11 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     val declaredTypes: Typing = Map()
     val eqs: Seq[(Term, Term)] = Seq()
     val ineqs: Seq[(Term, Term)] = Seq()
+    val tests: Seq[Tester] = Seq()
+    val negtests: Seq[Tester] = Seq()
 
     def solve =
-      solver.solve(Instance(sig, declaredTypes, eqs, ineqs, Seq(), Seq()))
+      solver.solve(Instance(sig, declaredTypes, eqs, ineqs, tests, negtests))
     def assertSat() =
       solve match {
         case Unsat(reason) =>
@@ -153,18 +155,60 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     assertUnsatDueTo[EmptyLabelling]()
   }
 
-  it should "return unsat on list equality with selectors" in new FiniteAndListSig {
+  it should "return unsat on trivial selector inequality" in new FiniteAndListSig {
+    val x = Variable(1)
+    override val eqs = Seq( (Head(x), Fina) )
+    override val ineqs = Seq( (Head(x), Fina) )
+    assertUnsatDueTo[InvalidEquality]
+  }
+  it should "return unsat on simple selector inequality" in new FiniteAndListSig {
+    val x = Variable(1)
+    override val eqs = Seq( (x, Cons(Fina,Nil)) )
+    override val ineqs = Seq( (Head(x), Fina) )
+    assertUnsatDueTo[InvalidEquality]
+  }
+  it should "return sat on list equality with selectors" in new FiniteAndListSig {
     val x = Variable(1)
     val y = Variable(2)
-    override val eqs = Seq( (y, Cons(x,Nil)), (Head(x), y), (Tail(x), Nil) )
+    override val eqs = Seq( (x, Cons(y,Nil)), (Head(x), y), (Tail(x), Nil) )
     assertSat()
   }
-  it should "return unsat on list inequality with selectors" in new FiniteAndListSig {
+
+  it should "return unsat on simple instantiation of Cons, no merge, no splitting" in new FiniteAndListSig {
     val x = Variable(1)
-    val y = Variable(2)
-    override val eqs = Seq( (Head(x), y), (Tail(x), Nil) )
-    override val ineqs = Seq( (y, Cons(x,Nil)) )
+    override val eqs = Seq( (Head(x), Fina), (Tail(x), Nil) )
+    override val ineqs = Seq( (x, Cons(Fina,Nil)) )
+    override val tests = Seq( Tester(1,0,x) )
     assertUnsatDueTo[InvalidEquality]()
   }
+  it should "return unsat on simple instantiation of Cons, with merge, no splitting" in new FiniteAndListSig {
+    solver.debugOn
+    val x = Variable(1)
+    val y = Variable(2)
+    override val eqs = Seq( (Head(x), Fina), (Tail(y), Nil), (x,y) )
+    override val ineqs = Seq( (x, Cons(Fina,Nil)) )
+    override val tests = Seq( Tester(1,0,x) )
+    assertUnsatDueTo[InvalidEquality]()
+  }
+  it should "return unsat on simple instantiation of Cons, with merge, no splitting, free var" in new FiniteAndListSig {
+//    solver.debugOn
+    val x = Variable(1)
+    val y = Variable(2)
+    val z = Variable(3)
+    override val eqs = Seq( (Head(x), z), (Tail(y), Nil), (x,y) )
+    override val ineqs = Seq( (x, Cons(z,Nil)) )
+    override val tests = Seq( Tester(1,0,x) )
+    assertUnsatDueTo[InvalidEquality]()
+  }
+  it should "return unsat on simple instantiation of Cons, with splitting" in new FiniteAndListSig {
+//    solver.debugOn
+    val x = Variable(1)
+    val z = Variable(3)
+    override val eqs = Seq( (Head(x), z), (Tail(x), Nil) )
+    override val ineqs = Seq( (x, Cons(z,Nil)) )
+    assertUnsatDueTo[InvalidEquality]()
+  }
+
+  // TODO: Test case to check Instantiate 2 rule
 
 }
