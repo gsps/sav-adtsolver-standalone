@@ -2,6 +2,7 @@ package sav
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.Breaks._
 
 /**
  * Created by Georg Schmid on 24.04.15.
@@ -32,7 +33,6 @@ package object types {
 import types._
 
 case class Instance(sig: Signature,
-                    // FIXME: declaredTypes is redundant b/c of [neg]tests!
                     declaredTypes: Typing,
                     eqs: Seq[(Term, Term)], ineqs: Seq[(Term, Term)],
                     tests: Seq[Tester], negtests: Seq[Tester]) {
@@ -44,14 +44,22 @@ case class Instance(sig: Signature,
     }
 }
 // Signature =^ seq of sorts, sort =^ seq of ctors, ctor =^ seq of arg. sorts
-case class Signature(sorts: Seq[Seq[Seq[SortRef]]]) {
-  val sortRefs: Set[SortRef] = (0 until sorts.size).toSet
+case class Signature(sorts: Seq[Seq[Seq[SortRef]]], designatedTerms: Seq[Seq[Seq[Term]]]) {
+  val sortRefs: Seq[SortRef] = (0 until sorts.size).toSeq
 
   require(sorts forall { ctors =>
     ctors forall { args =>
       args forall sortRefs.contains
     }
   })
+  // Check that designatedTerms is of the same shape as sorts
+  require(designatedTerms.size == sorts.size &&
+    designatedTerms.zipWithIndex.forall { case (ofSort, sort) =>
+      ofSort.size == sorts(sort).size &&
+        ofSort.zipWithIndex.forall { case (ofCtor, ctor) =>
+          ofCtor.size == sorts(sort)(ctor).size
+        }
+      })
 
   // FIXME: Inefficient to generate Sets here.
   def ctorRefs(sort: SortRef): CtorRefSet = {
@@ -84,9 +92,9 @@ case class Signature(sorts: Seq[Seq[Seq[SortRef]]]) {
       (argSorts forall (as => !from.contains(as) && isFiniteSort(as, from)))
   }
 
-  // TODO: Implement designated terms for selectors applied to terms of the
-  //  'wrong' sort/ctor and add appropriate test cases.
-  def designatedTerm(sort: SortRef, ctor: CtorRef): TermRef = ???
+  // Designated terms for selectors applied to terms of the 'wrong' sort/ctor
+  def allDesignatedTerms(): Seq[Term] =
+    designatedTerms flatMap { _ flatMap identity }
 }
 
 sealed abstract class Term {
@@ -119,57 +127,69 @@ case class InvalidEquality(i: TermRef, j: TermRef) extends UnsatReason
 
 class AdtSolver() {
 
+  case class State(
+    nextTermId: TermRef, maxVarId: VarId,
+    terms: ArrayBuffer[Term], termRefs: mutable.HashMap[Term, TermRef],
+    eqClasses: ArrayBuffer[TermRef], eqClassSizes: ArrayBuffer[Int],
+    eqClassConsts: ArrayBuffer[Option[ConstId]], labels: ArrayBuffer[Labels],
+    outEdges: ArrayBuffer[ArrayBuffer[TermRef]],
+    inEdges: ArrayBuffer[mutable.HashSet[TermRef]],
+    sharedSets: mutable.HashMap[(TermRef, TermRef), mutable.HashSet[Index]],
+    selectorsOf: mutable.HashMap[TermRef, SelectorMap],
+    instantiated: ArrayBuffer[Boolean],
+    remLabelling: (TermRef, SortRef, CtorRefSet))
+
   // TODO: Consider special case of a single sort with a single constructor,
   //  that is, labels(t) == None -- which then is the implicit representation of
   //  labels(t) == {the single constructor} -- might allow rule Instantiate 2
   //  (and others?).
 
+  protected var sig: Signature = null
+  protected var declaredTypes: Typing = null
+
+  protected val stateStack = new mutable.ArrayStack[State]
+
   // Invariant: size of {terms, eqClass[Siz]es, labels, ...} == nextTermId
   protected var nextTermId: TermRef = 0
   protected var maxVarId: VarId = 0
 
-  protected var sig: Signature = null
-  protected var declaredTypes: Typing = null
+  protected var terms         = new ArrayBuffer[Term]
+  protected var termRefs      = new mutable.HashMap[Term, TermRef]
 
-  protected val terms         = new ArrayBuffer[Term]
-  protected val termRefs      = new mutable.HashMap[Term, TermRef]
+  protected var eqClasses     = new ArrayBuffer[TermRef]
+  protected var eqClassSizes  = new ArrayBuffer[Int]
+  protected var eqClassConsts = new ArrayBuffer[Option[ConstId]]
+  protected var labels        = new ArrayBuffer[Labels]
 
-  protected val eqClasses     = new ArrayBuffer[TermRef]
-  protected val eqClassSizes  = new ArrayBuffer[Int]
-  protected val eqClassConsts = new ArrayBuffer[Option[ConstId]]
-  protected val labels        = new ArrayBuffer[Labels]
-
-  // >> DISREGARD THIS FOR NOW.
-  // NOTE: On the right data structure for edge lists:
-  //  We operate on these edge lists in two ways,
-  //    a) we iterate over them (in no particular order), and
-  //    b) we merge them (when merging equivalence classes and thus the
-  //        representatives' data structures, incl. edge lists).
-  //  TODO: Thus, use linked lists (which can be merged in O(n)).
-  // <<
-  protected val outEdges      = new ArrayBuffer[ArrayBuffer[TermRef]]
-  protected val inEdges       = new ArrayBuffer[mutable.HashSet[TermRef]]
-  //  protected val sources       = new mutable.HashSet[TermRef]
-  //  protected val sinks         = new mutable.HashSet[TermRef]
-  protected val sharedSets    = new mutable.HashMap[(TermRef, TermRef), mutable.HashSet[Index]]
+  protected var outEdges      = new ArrayBuffer[ArrayBuffer[TermRef]]
+  protected var inEdges       = new ArrayBuffer[mutable.HashSet[TermRef]]
+  protected var sharedSets    = new mutable.HashMap[(TermRef, TermRef), mutable.HashSet[Index]]
 
   // selectorsOf maps uninstantiated terms to the set of selectors referring to them
   //  Invariant: outEdges(t).isEmpty || !selectorsOf.contains(t)
   type SelectorMap = mutable.HashMap[(SortRef, CtorRef, Index), Selector]
-  protected val selectorsOf       = new mutable.HashMap[TermRef, SelectorMap]
   protected val emptySelectorMap  = new SelectorMap
+  protected var selectorsOf       = new mutable.HashMap[TermRef, SelectorMap]
+  // Our notion of inst(antiated) diverges a bit from the paper's:
+  // Invariant: instantiated(r) == true iff r is the representative of an equivalence class ->
+  //  including a Constructor
+  protected var instantiated      = new ArrayBuffer[Boolean]
+
   protected val potentialInst     = new mutable.HashSet[TermRef]
-  protected val instantiated      = new mutable.ArrayBuffer[Boolean]
   protected val downSet           = new mutable.ArrayStack[(TermRef, TermRef)]
 
   protected var debug = false
+  protected var debug_didSplit = false
 
-  protected def resetInternalState(): Unit = {
-    nextTermId  = 0
-    maxVarId    = 0
-
+  protected def resetState(): Unit = {
     sig = null
     declaredTypes = null
+
+    stateStack.clear()
+
+    // >>> potentially branched part of state
+    nextTermId  = 0
+    maxVarId    = 0
 
     terms.clear()
     termRefs.clear()
@@ -187,14 +207,69 @@ class AdtSolver() {
 
     selectorsOf.clear()
     instantiated.clear()
+    // <<<
+
     potentialInst.clear()
     downSet.clear()
+
+    debug_didSplit = false
   }
 
-  protected def allTermRefs: Seq[TermRef] = (0 until nextTermId).toSeq
+  protected def deepCopy[A](a: A)(implicit m: reflect.Manifest[A]): A =
+    util.Marshal.load[A](util.Marshal.dump(a))
+  
+  protected def pushState(remLabelling: (TermRef, SortRef, CtorRefSet)): Unit = {
+    // We only push and pop states when closure computation has converged
+    assert(downSet.isEmpty)
+    assert(potentialInst.isEmpty)
 
-//  protected def getOrCreateTermRef(term: Term): TermRef =
-//    termRefs.getOrElse(term, {registerTerm(term)})
+    val _outEdges     = new ArrayBuffer[ArrayBuffer[TermRef]](outEdges.size) ++=
+      outEdges.map(_.clone())
+    val _inEdges      = new ArrayBuffer[mutable.HashSet[TermRef]](inEdges.size) ++=
+      inEdges.map(_.clone())
+    val _sharedSets   = new mutable.HashMap[(TermRef, TermRef), mutable.HashSet[Index]] ++=
+      sharedSets.mapValues(_.clone())
+    val _selectorsOf  = new mutable.HashMap[TermRef, SelectorMap]() ++=
+      selectorsOf.mapValues(_.clone())
+
+    val state = State(
+      nextTermId, maxVarId,
+      terms.clone(), termRefs.clone(),
+      eqClasses.clone(), eqClassSizes.clone(), eqClassConsts.clone(), labels.clone(),
+      _outEdges, _inEdges, _sharedSets, _selectorsOf, instantiated.clone(),
+      remLabelling)
+    stateStack push state
+  }
+
+  protected def popState(): (TermRef, SortRef, CtorRefSet) = {
+    assert(downSet.isEmpty)
+    assert(potentialInst.isEmpty)
+
+    val state = stateStack.pop()
+
+    nextTermId  = state.nextTermId
+    maxVarId    = state.maxVarId
+
+    terms     = state.terms
+    termRefs  = state.termRefs
+
+    eqClasses     = state.eqClasses
+    eqClassSizes  = state.eqClassSizes
+    eqClassConsts = state.eqClassConsts
+    labels        = state.labels
+
+    outEdges    = state.outEdges
+    inEdges     = state.inEdges
+    sharedSets  = state.sharedSets
+
+    selectorsOf   = state.selectorsOf
+    instantiated  = state.instantiated
+
+    state.remLabelling
+  }
+
+
+  protected def allTermRefs: Seq[TermRef] = (0 until nextTermId).toSeq
 
   protected def freshVariable(): Variable = {
     maxVarId += 1
@@ -303,18 +378,17 @@ class AdtSolver() {
     }
   }
 
+  // TODO: Instead of recomputing, keep books on HashSet[TermRef] reps
+  protected def reps =
+    (eqClasses.iterator.zipWithIndex filter {case (s,i) => s == i} map(_._2)).toSeq
+//  protected def instantiatedReps =
+//    reps filter(instantiated(_))
+
   protected def sharedSetOf(ri: TermRef, rj: TermRef): mutable.HashSet[Index] = {
     assert(ri != rj)
     val sharedRef = if (ri <= rj) (ri, rj) else (rj, ri)
     sharedSets.getOrElseUpdate(sharedRef, new mutable.HashSet[Index])
   }
-
-  //  protected def _arrayBufferPop[A](buf: ArrayBuffer[A]): A = {
-  //    // Make-shift pop():
-  //    val x = buf(buf.size - 1)
-  //    buf.reduceToSize(buf.size - 1)
-  //    x
-  //  }
 
   protected def pathExists(from: TermRef, to: TermRef): Boolean = {
     // TODO: Substitute with some efficient data structure + algorithm
@@ -328,39 +402,6 @@ class AdtSolver() {
     }
     false
   }
-
-  //  protected def _topoTerms(initial: mutable.HashSet[TermRef],
-  //                           edges: ArrayBuffer[Iterable[TermRef]],
-  //                           backEdges: ArrayBuffer[Iterable[TermRef]],
-  //                           f: (TermRef) => Unit): Unit = {
-  //    val work = initial.clone()
-  //    val degrees = ArrayBuffer(allTermRefs.map(t => backEdges(t).size) : _*)
-  //
-  //    while (work.nonEmpty) {
-  //      val t: TermRef = work.head
-  //      work.remove(t)
-  //
-  //      for (s <- edges(t)) {
-  //        degrees(s) -= 1
-  //        if (degrees(s) == 0)
-  //          work.add(s)
-  //      }
-  //
-  //      f(t)
-  //    }
-  //  }
-  //
-  //  // Calls f with each term in topological order
-  //  protected def topoTerms(f: (TermRef) => Unit): Unit =
-  //    _topoTerms(sources,
-  //      outEdges.asInstanceOf[ArrayBuffer[Iterable[TermRef]]],
-  //      inEdges.asInstanceOf[ArrayBuffer[Iterable[TermRef]]], f)
-  //
-  //  // Calls f with each term in reverse topological order
-  //  protected def reverseTopoTerms(f: (TermRef) => Unit): Unit =
-  //    _topoTerms(sinks,
-  //      inEdges.asInstanceOf[ArrayBuffer[Iterable[TermRef]]],
-  //      outEdges.asInstanceOf[ArrayBuffer[Iterable[TermRef]]], f)
 
   // Restricts the labelling of term t to the intersection of the previously
   //  known labels of t and the given labels (ctors of the given sort).
@@ -382,6 +423,9 @@ class AdtSolver() {
         labels(rt) = Some((sort0, mutable.BitSet.empty))
         false
     }
+//    printDebug(s"Labelled ${rt} w/ ${labels(rt)}")
+//    printDebug((new IllegalArgumentException).getStackTrace.mkString("\n"))
+
     // Is the term's ctor now unambiguous?
     if (!instantiated(rt)) {
       labels(rt) match {
@@ -401,7 +445,7 @@ class AdtSolver() {
         selectorsOf.get(t)
           .map( _
               .collect {case ((_sort, _ctor, _), sel) if _sort != sort || !ctors1.contains(_ctor) => sel}
-              .foreach {sel => downSet.push((ref(sel), sig.designatedTerm(sel.sort, sel.ctor)))}
+              .foreach {sel => downSet.push((ref(sel), ref(sig.designatedTerms(sel.sort)(sel.ctor)(sel.index))))}
             )
       case _ =>
         //
@@ -466,19 +510,11 @@ class AdtSolver() {
     //    }
 
     inEdges(ri) ++= inEdges(rj)
-    //    if (sources.contains(ri) && inEdges(ri).nonEmpty)
-    //      sources -= ri
 
     // FIXME: References in edgelists should be updated to their representatives -- generally in _merge?
 
     val esi = outEdges(ri)
     val esj = outEdges(rj)
-//    if (esi.isEmpty && esj.nonEmpty) {
-//      // FIXME: When combining (out?) edgelists the reference should be updated to their representatives
-//      esi ++= esj
-//      //      if (sinks.contains(ri))
-//      //        sinks -= ri
-//    }
 
     // A term either is already instantiated (and thus has arguments connected to it)
     //  or is uninstantiated and in that case *may* have selectors referring to it.
@@ -548,17 +584,66 @@ class AdtSolver() {
       _merge(rj, ri)
   }
 
+  // Parts of main loop
+
+  protected def instantiate(): Boolean = {
+    var converged = true
+
+    // [Selector rules / Instantiate 1 & 2]
+    // TODO: Go through occasions on which potentialInst is populated and perhaps cut them down.
+    // A term is added to potentialInst only once, i.e. as soon as a single labels is associated
+    //  with it.
+    // Terms are never added to potentialInst when they have already been instantiated.
+    // However: Due to merges queued up in the downSet, some terms in potentialInst will --
+    //  by the time we run this loop -- in fact be in an instantiated equivalence class.
+    for (t <- potentialInst if !instantiated(t)) {
+      printDebug(s"Potential instantiation of $t")
+      converged = false
+      ctorOf(t) match {
+        case Some(sc @ (sort, ctor)) =>
+          printDebug(s"\t@ $sort, $ctor")
+          val shouldInstantiate =
+            // Instantiate 1
+            (selectorsOf.get(t) match {
+              case Some(selectors) =>
+                sig.argIndices(sort, ctor).toSet subsetOf
+                  (selectors.keysIterator collect { case (`sort`, `ctor`, i) => i} toSet)
+              case _ => false
+            }) ||
+            // Instantiate 2
+            sig.isFiniteCtor(sort, ctor)
+          if (shouldInstantiate) {
+            val selectors = selectorsOf.getOrElse(t, emptySelectorMap)
+            val args = sig.argIndices(sort, ctor) map { index =>
+              // FIXME: Should we label the fresh variable with ctors of the argument sort? (relevant for Inst 2)
+              selectors.getOrElse((sort, ctor, index), freshVariable())
+            }
+            val newConstructor = Constructor(sort, ctor, args.toList)
+            downSet push (t, registerTerm(newConstructor))
+            selectorsOf.remove(t)
+            //            instantiated(t) = true // Implied by merge later on
+            printDebug(s"\tdone!")
+          }
+        case None =>
+          assert(false, "Only terms whose ctor has been determined can be instantiated")
+      }
+    }
+
+    potentialInst.clear()
+    converged
+  }
+
   def solve(inst: Instance): Result = {
     // Prepare internal state
-    resetInternalState()
+    resetState()
 
     sig = inst.sig
+    assert(sig.sorts.size > 0)
     declaredTypes = inst.declaredTypes
 
     inst.allTopLevelTerms foreach registerTerm
+    sig.allDesignatedTerms foreach registerTerm
     printDebug(dumpTerms())
-    //    allTermRefs filter(inEdges(_).isEmpty) foreach sources.add
-    //    allTermRefs filter(outEdges(_).isEmpty) foreach sinks.add
 
     // Actual algorithm
     // = Process literals
@@ -569,7 +654,6 @@ class AdtSolver() {
     }
 
     // [Lit-level rules / Remove]
-    // TODO: Needs test cases
     inst.tests foreach {case Tester(sort, ctor, t) =>
       val res = label(ref(t), sort, newCtorRefSet(Set(ctor)))
       if (res.isDefined)
@@ -579,6 +663,7 @@ class AdtSolver() {
     // TODO: Needs test cases
     // NOTE: Does not exactly match rule 'Remove 2' in the paper
     //  (note difference between sort(v) vs. sort of tester)
+    // FIXME: ACTUALLY, neither makes sense.
     inst.negtests foreach {case Tester(sort, ctor, t) =>
       val ctorRefs = sig.ctorRefs(sort) - ctor
       val res = label(ref(t), sort, ctorRefs)
@@ -594,159 +679,139 @@ class AdtSolver() {
     // Alternate between computing unification (downward) and
     //  congruence (upward) closures
     var splittingConverged = false
+    var lastUnsatReason: Option[UnsatReason] = None
     while (!splittingConverged) {
       splittingConverged = true
+      lastUnsatReason = None
 
-      var closuresConverged = false
-      while (!closuresConverged) {
-        closuresConverged = true
+      breakable {
+        var closuresConverged = false
+        while (!closuresConverged) {
+          closuresConverged = instantiate()
 
-        // [Selector rules / Instantiate 1 & 2]
-        // TODO: Go through occasions on which potentialInst is populated and perhaps cut them down.
-        // A term is added to potentialInst only once, i.e. as soon as a single labels is associated
-        //  with it.
-        // Terms are never added to potentialInst when they have already been instantiated.
-        // However: Due to merges queued up in the downSet, some terms in potentialInst will --
-        //  by the time we run this loop -- in fact be in an instantiated equivalence class.
-        for (t <- potentialInst if !instantiated(t)) {
-          printDebug(s"Potential instantiation of $t")
-          closuresConverged = false
-          ctorOf(t) match {
-            case Some(sc @ (sort, ctor)) =>
-              val instantiate =
-                !sig.isNullaryCtor(sort, ctor) && (
-                  // Instantiate 1
-                  (selectorsOf.get(t) match {
-                    case Some(selectors) =>
-                      // WRONG?
-                      //                  selectors exists {case (i,s) => s.sort == sort && s.ctor == ctor}
-                      sig.argIndices(sort, ctor).toSet subsetOf
-                        (selectors.keysIterator collect {case (`sort`,`ctor`,i) => i} toSet)
-                    case _ => false
-                  }) ||
-                    // Instantiate 2
-                    sig.isFiniteCtor(sort, ctor)
-                  )
-              if (instantiate) {
-                printDebug(s"\tdone!")
-                val selectors = selectorsOf.getOrElse(t, emptySelectorMap)
-                val args = sig.argIndices(sort, ctor) map { index =>
-                  selectors.getOrElse((sort, ctor, index), freshVariable())
-                }
-                val newConstructor = Constructor(sort, ctor, args.toList)
-                downSet push (t, registerTerm(newConstructor))
-                selectorsOf.remove(t)
-                //            instantiated(t) = true // Implied by merge later on
-              }
-            //          case None =>
-            //            //
+          // [Unification closure / Decompose]
+          while (downSet.nonEmpty) {
+            closuresConverged = false
+            val (i, j) = downSet.pop()
+
+            merge(i, j) match {
+              case Right(unsatReason) =>
+                lastUnsatReason = Some(unsatReason)
+                break
+              case _ =>
+              //
+            }
           }
-        }
-        potentialInst.clear()
 
-        // [Unification closure / Decompose]
-        while (downSet.nonEmpty) {
-          closuresConverged = false
-          val (i, j) = downSet.pop()
+          // TODO: Instantiate here as well?
 
-          //        val (ri, rj) = (repr(i), repr(j))
-          //        {
-          //          // If r and j are equivalent, so must be their corresponding children (i.e., we merge)
-          //          val esi = outEdges(ri)
-          //          val esj = outEdges(rj)
-          //
-          //          // A term either is already instantiated (and thus has arguments connected to it)
-          //          //  or is uninstantiated and in that case *may* have selectors referring to it.
-          //          assert(esi.isEmpty || !selectorsOf.contains(ri))
-          //          assert(esj.isEmpty || !selectorsOf.contains(rj))
-          //
-          //          if (esi.nonEmpty && esj.nonEmpty) {
-          //            assert(esi.size == esj.size)
-          //            downSet ++= esi zip esj
-          //          } else {
-          //            // selectorsOf are implicit (i.e. not yet connected) children that we also need to merge
-          //            (selectorsOf.get(ri), selectorsOf.get(rj)) match {
-          //              case (Some(selectorsi), Some(selectorsj)) =>
-          //
-          //              case (Some(selectors), _) if esj.nonEmpty =>
-          //              case (_, Some(selectors)) if esi.nonEmpty =>
-          //              case _ =>
-          //              //
-          //            }
-          //          }
-          //        }
-
-          merge(i, j) match {
-            case Left(_) =>
-            //
-            case Right(unsatReason) =>
-              return Unsat(unsatReason)
-          }
-        }
-
-        // TODO: Instantiate here as well?
-
-        // [Congruence closure / Simplify 2]
-        //      while (upSet.nonEmpty) {
-        //        converged = false
-        //        val (i, j) = upSet.pop()
-        //        merge(i, j) match {
-        //          case Some((ri, rj)) =>
-        //            //
-        //          case None =>
-        //            return false
-        //        }
-        //      }
-        // TODO: Don't rebuild repsWithCtors every time
-        val reps =
-          (eqClasses.iterator.zipWithIndex filter {case (s,i) => s == i} map(_._2)).toSeq
-        val repsWithCtors =
-        //        (reps zip (reps map ctorOf) collect {case (r, Some(sc)) => (r, sc)}).toSeq
-          (reps zip (reps filter(instantiated(_)) map ctorOf) collect {case (r, Some(sc)) => (r, sc)}).toSeq
-        for ((ri, (sorti, ctori)) <- repsWithCtors) {
-          val esi = outEdges(ri)
-          for ((rj, (sortj, ctorj)) <- repsWithCtors) {
-            // TODO: Avoid symmetrical cases, e.g. (0,1) and (1,0)
-            if (ri != rj && sorti == sortj && ctori == ctorj) {
-              val esj = outEdges(rj)
-              val sharedSet = sharedSetOf(ri, rj)
-              val indices = sig.argIndices(sorti, ctori).toSet
-              for (index <- indices diff sharedSet) {
-                if (repr(esi(index)) == repr(esj(index))) {
-                  sharedSet.add(index)
+          // [Congruence closure / Simplify 2]
+          // TODO: This part is totally inefficient atm
+          // TODO: Don't rebuild repsWithCtors every time?
+          val repsWithDeterminedCtors =
+            (reps zip ((reps filter instantiated) map ctorOf) collect {case (r, Some(sc)) => (r, sc)}).toSeq
+          for ((ri, (sorti, ctori)) <- repsWithDeterminedCtors) {
+            val esi = outEdges(ri)
+            for ((rj, (sortj, ctorj)) <- repsWithDeterminedCtors) {
+              // TODO: Avoid symmetrical cases, e.g. (0,1) and (1,0)
+              if (ri != rj && sorti == sortj && ctori == ctorj) {
+                val esj = outEdges(rj)
+                val sharedSet = sharedSetOf(ri, rj)
+                val indices = sig.argIndices(sorti, ctori).toSet
+                for (index <- indices diff sharedSet) {
+                  if (repr(esi(index)) == repr(esj(index))) {
+                    sharedSet.add(index)
+                  }
                 }
-              }
-              //            printDebug(s"sharedSet($ri, $rj) = $sharedSet")
-              if (sharedSet.size == indices.size) {
-                closuresConverged = false
-                merge(ri, rj) match {
-                  case Right(unsatReason) =>
-                    return Unsat(unsatReason)
-                  case _ =>
-                  //
+                //            printDebug(s"sharedSet($ri, $rj) = $sharedSet")
+                if (sharedSet.size == indices.size) {
+                  closuresConverged = false
+                  merge(ri, rj) match {
+                    case Right(unsatReason) =>
+                      lastUnsatReason = Some(unsatReason)
+                      break
+                    case _ =>
+                    //
+                  }
                 }
               }
             }
           }
-        }
-      } // << while (!converged)
+        } // << while (!converged)
+      }
 
-//      val reps =
-//        (eqClasses.iterator.zipWithIndex filter {case (s,i) => s == i} map(_._2)).toSeq
-//      reps find { r => !instantiated(r) && ctorOf(r).isEmpty } map { r =>
-//        splittingConverged = false
-//        // TODO: Implement splitting
-//      }
+      // = Check inequalities
+      // TODO: Check this upon every merge in some efficient way
+      inst.ineqs.find {case (s, t) => repr(ref(s)) == repr(ref(t))} match {
+        case Some((s,t)) =>
+          lastUnsatReason = Some(InvalidEquality(ref(s), ref(t)))
+        case _ =>
+        //
+      }
+
+      // Branching: Here we either
+      //  a) continue, because the current branch is unsat and we can still backtrack, OR
+      //  b) converge. because we have explored all states and no sat. model was found, OR
+      //  c) converge, because a satisfying model has been found, OR
+      //  d) continue, because this branch is still undecided (we can still split).
+      val wasUnsat = lastUnsatReason.isDefined
+      splittingConverged = if (wasUnsat) {
+        printDebug(s"\n+ branch was unsat")
+        // Nothing to split, Unsat branch
+        //  i.e. not a model, but we have more states to search
+        if (stateStack.nonEmpty) {
+          // Pop
+          val (r, remSort, remCtors) = popState()
+          val unsatReason = label(r, remSort, remCtors)
+          assert(unsatReason.isEmpty)
+          false // a)
+        } else {
+          // No more branches to check, ultimately unsat
+          true // b)
+        }
+      } else {
+        val splitOn =
+          reps find { r => !instantiated(r) && ctorOf(r).isEmpty }
+        printDebug(s"\n+ split on $splitOn")
+        splitOn match {
+          case None =>
+            // Nothing to split, Sat branch
+            //  i.e. we found a model
+            true // c)
+          case Some(r) =>
+            // Split
+            debug_didSplit = true
+            val (guessedSort, guessedCtor) = labels(r) match {
+              case None =>
+                printDebug(s"splitting on $r / ${terms(r)}: (universal labeling)")
+                val (sort, ctor) = (0, 0)
+                // TODO: We should be able to represent arbitrary sets of ctors in labels(),
+                //  instead we encode the various remaining sets per sort as a separate return
+                //  state per sort.
+                for (otherSort <- sig.sortRefs.reverseIterator if otherSort != sort)
+                  pushState((r, otherSort, sig.ctorRefs(otherSort)))
+                if (sig.sorts(sort).size > 1)
+                  pushState((r, sort, sig.ctorRefs(sort) - ctor))
+                (sort, ctor)
+              case Some((sort, ctors)) =>
+                printDebug(s"splitting on $r / ${terms(r)}: $sort $ctors")
+                val ctor = ctors.head
+                if (ctors.size > 1)
+                  pushState((r, sort, ctors - ctor))
+                (sort, ctor)
+            }
+            val unsatReason = label(r, guessedSort, newCtorRefSet(Set(guessedCtor)))
+            assert(unsatReason.isEmpty)
+            false // d)
+        }
+      } // << splittingConverged = {true, false}
+      printDebug(s"\t(state stack size = ${stateStack.size})")
     } // << while (!splittingConverged)
 
+    // In case we converged via case b) above:
+    if (lastUnsatReason.isDefined)
+      return Unsat(lastUnsatReason.head)
 
-    // = Check inequalities
-    inst.ineqs.find {case (s, t) => repr(ref(s)) == repr(ref(t))} match {
-      case Some((s,t)) =>
-        return Unsat(InvalidEquality(ref(s), ref(t)))
-      case _ =>
-      //
-    }
 
     printDebug(dumpTerms())
     printDebug(dumpEqClasses())
@@ -771,6 +836,7 @@ class AdtSolver() {
 
   def debugOn(): Unit = debug = true
   def debugOff(): Unit = debug = false
+  def debugDidSplit(): Boolean = debug_didSplit
 
   protected def printDebug(s: String) =
     if (debug) println(s)

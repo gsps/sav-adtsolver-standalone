@@ -29,41 +29,58 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     val tests: Seq[Tester] = Seq()
     val negtests: Seq[Tester] = Seq()
 
+    val expectSplitting: Option[Boolean] = None //Some(false)
+
+    def checkSplitting() = {
+      val didSplit = solver.debugDidSplit()
+      if (expectSplitting.isDefined && expectSplitting.head != didSplit)
+        fail(if (didSplit) "Unexpected splitting" else "Expected splitting, but none occurred")
+    }
+
     def solve =
       solver.solve(Instance(sig, declaredTypes, eqs, ineqs, tests, negtests))
-    def assertSat() =
+
+    def assertSat() = {
       solve match {
         case Unsat(reason) =>
           fail(s"Unexpectedly unsat: $reason\n" + solver.dumpTerms())
         case _ => // Ok
       }
-    def assertUnsat() =
+      checkSplitting()
+    }
+    def assertUnsat() = {
       solve match {
         case Sat() => fail(s"Unexpectedly sat")
         case _ => // Ok
       }
-    def assertUnsatDueTo[T <: UnsatReason]()(implicit ev: ClassTag[T]) =
+      checkSplitting()
+    }
+    def assertUnsatDueTo[T <: UnsatReason]()(implicit ev: ClassTag[T]) = {
       solve match {
         case Sat() => fail(s"Unexpectedly sat")
         case Unsat(_: T) => // Ok
         case Unsat(reason) => fail(s"Expected unsat due to $ev, instead got $reason")
       }
+      checkSplitting()
+    }
   }
   trait SimpleFiniteSig extends FreshSolver {
-    val sigFin = Seq(Seq(), Seq()) // Cona, Conb
-    val sig = Signature(Seq(sigFin))
-
     val Fina = Constructor(0,0,List())
     val Finb = Constructor(0,1,List())
+
+    val sigFin = Seq(Seq(), Seq()) // Cona, Conb
+    val sigFinDts = Seq(Seq(), Seq())
+    val sig = Signature(Seq(sigFin), Seq(sigFinDts))
   }
   trait FiniteAndListSig extends SimpleFiniteSig {
-    val sigList = Seq(Seq(0,1), Seq()) // Cons(Fin, List), Nil
-    override val sig = Signature(Seq(sigFin, sigList))
-
     def Cons(h: Term, t:Term) = Constructor(1,0,List(h,t))
     val Nil = Constructor(1,1,List())
     def Head(cons: Term) = Selector(1,0,0,cons)
     def Tail(cons: Term) = Selector(1,0,1,cons)
+
+    val sigList = Seq(Seq(0,1), Seq()) // Cons(Fin, List), Nil
+    val sigListDts = Seq(Seq(Fina, Nil), Seq())
+    override val sig = Signature(Seq(sigFin, sigList), Seq(sigFinDts, sigListDts))
   }
 
   before {
@@ -79,6 +96,9 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
   }
 
   it should "return sat on trivial constraints" in new SimpleFiniteSig {
+    // TODO: This case (any many other simple ones) should work without splitting as
+    //  soon as inequality detection has been improved
+//    override val expectSplitting = Some(false)
     override val eqs = Seq((Variable(1), Variable(1)))
     assertSat()
   }
@@ -182,7 +202,6 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     assertUnsatDueTo[InvalidEquality]()
   }
   it should "return unsat on simple instantiation of Cons, with merge, no splitting" in new FiniteAndListSig {
-    solver.debugOn
     val x = Variable(1)
     val y = Variable(2)
     override val eqs = Seq( (Head(x), Fina), (Tail(y), Nil), (x,y) )
@@ -191,7 +210,6 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     assertUnsatDueTo[InvalidEquality]()
   }
   it should "return unsat on simple instantiation of Cons, with merge, no splitting, free var" in new FiniteAndListSig {
-//    solver.debugOn
     val x = Variable(1)
     val y = Variable(2)
     val z = Variable(3)
@@ -201,7 +219,8 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     assertUnsatDueTo[InvalidEquality]()
   }
   it should "return unsat on simple instantiation of Cons, with splitting" in new FiniteAndListSig {
-//    solver.debugOn
+    solver.debugOn
+    override val expectSplitting = Some(true)
     val x = Variable(1)
     val z = Variable(3)
     override val eqs = Seq( (Head(x), z), (Tail(x), Nil) )
