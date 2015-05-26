@@ -79,7 +79,7 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     def Tail(cons: Term) = Selector(1,0,1,cons)
 
     val sigList = Seq(Seq(0,1), Seq()) // Cons(Fin, List), Nil
-    val sigListDts = Seq(Seq(Fina, Nil), Seq())
+    val sigListDts = Seq(Seq(Nil, Nil), Seq())
     override val sig = Signature(Seq(sigFin, sigList), Seq(sigFinDts, sigListDts))
   }
 
@@ -219,13 +219,28 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     assertUnsatDueTo[InvalidEquality]()
   }
   it should "return unsat on simple instantiation of Cons, with splitting" in new FiniteAndListSig {
-    solver.debugOn
+//    solver.debugOn
     override val expectSplitting = Some(true)
     val x = Variable(1)
     val z = Variable(3)
     override val eqs = Seq( (Head(x), z), (Tail(x), Nil) )
     override val ineqs = Seq( (x, Cons(z,Nil)) )
     assertUnsatDueTo[InvalidEquality]()
+  }
+
+  it should "return unsat on degenerate cyclic list example" in new FiniteAndListSig {
+    solver.debugOn
+    override val expectSplitting = Some(true)
+    val x = Variable(1)
+    val z = Variable(3)
+    def TailN: (Int, Term) => Term = (n, arg) => n match {
+      case 0 => arg
+      case 1 => Tail(arg)
+      case i => Tail(TailN(i-1, arg))
+    }
+    override val eqs = Seq( (TailN(2,z), x), (z, x) )
+    override val tests = Seq( Tester(1,0,z) )
+    assertUnsatDueTo[Cyclic]()
   }
 
   // TODO: Test case to check Instantiate 2 rule
