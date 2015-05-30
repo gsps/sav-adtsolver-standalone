@@ -115,7 +115,7 @@ case class Tester(sort: SortRef, ctor: CtorRef, arg: Term)
 
 
 abstract class Result
-case class Sat() extends Result
+case class Sat(model: Seq[(Option[(SortRef, CtorRef)], Seq[Term])]) extends Result
 case class Unsat(reason: UnsatReason) extends Result
 
 abstract class UnsatReason
@@ -744,8 +744,9 @@ class AdtSolver() {
           // [Congruence closure / Simplify 2]
           // TODO: This part is inefficient atm
           // TODO: Don't rebuild repsWithCtors every time?
+          val repsInstantiated = reps filter instantiated
           val repsWithDeterminedCtors =
-            (reps zip ((reps filter instantiated) map ctorOf) collect {case (r, Some(sc)) => (r, sc)}).toSeq
+            (repsInstantiated zip (repsInstantiated map ctorOf) collect {case (r, Some(sc)) => (r, sc)}).toSeq
           for ((ri, (sorti, ctori)) <- repsWithDeterminedCtors) {
             val esi = outEdges(ri)
             for ((rj, (sortj, ctorj)) <- repsWithDeterminedCtors) {
@@ -793,7 +794,7 @@ class AdtSolver() {
       //  d) continue, because this branch is still undecided (we can still split).
       val wasUnsat = lastUnsatReason.isDefined
       splittingConverged = if (wasUnsat) {
-        printDebugIndent(stateStack.size+1, "branch was unsat")
+        printDebugIndent(stateStack.size, "branch was unsat")
         // Nothing to split, Unsat branch
         //  i.e. not a model, but we have more states to search
         if (stateStack.nonEmpty) {
@@ -809,7 +810,7 @@ class AdtSolver() {
       } else {
         val splitOn =
           reps find { r => !instantiated(r) && ctorOf(r).isEmpty }
-        printDebugIndent(stateStack.size+1, s"split on ${if (splitOn.isEmpty) "nothing" else niceTerm(splitOn.head)}")
+        printDebugIndent(stateStack.size, s"split on ${if (splitOn.isEmpty) "nothing" else niceTerm(splitOn.head)}")
         splitOn match {
           case None =>
             // Nothing to split, Sat branch
@@ -856,7 +857,14 @@ class AdtSolver() {
       return Unsat(lastUnsatReason.head)
 
     // Success!
-    Sat()
+    val model = {
+      val equalSets = new mutable.HashMap[TermRef, mutable.HashSet[TermRef]]
+      for (t <- allTermRefs)
+        equalSets.getOrElseUpdate(repr(t), new mutable.HashSet()) += t
+//      equalSets.values.map(_.map(terms).toSeq).toSeq
+      equalSets.map({ case (r,clas) => (ctorOf(r), clas.map(terms).toSeq)  }).toSeq
+    }
+    Sat(model)
   }
 
 
@@ -892,18 +900,18 @@ class AdtSolver() {
   protected def printDebug(s: String) =
     if (debug) println(s)
   protected def printDebugIndent(depth: Int, s: String, indentStr: String = "+") =
-    if (debug) println(indentStr*depth + " " + s)
+    if (debug) println("<" + indentStr*depth + " " + s)
 
   protected def HEY() = {
     printDebug((new IllegalArgumentException).getStackTrace().mkString("HEY:\n","\n","\n"))
   }
 
-  protected def termNiceness(t: TermRef): Int = terms(t) match {
+  def termNiceness(term: Term): Int = term match {
     case _: Variable => 0
     case _: Constant => 2
     case _: Selector => 1
     case _: Constructor => 3
   }
   protected def niceTerm(r: TermRef) =
-    terms(allTermRefs filter(repr(_) == r) maxBy(termNiceness(_)))
+    terms(allTermRefs filter(repr(_) == r) maxBy({t => termNiceness(terms(t))}))
 }

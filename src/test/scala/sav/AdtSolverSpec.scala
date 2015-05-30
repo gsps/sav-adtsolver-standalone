@@ -40,24 +40,31 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     def solve =
       solver.solve(Instance(sig, declaredTypes, eqs, ineqs, tests, negtests))
 
-    def assertSat() = {
+    def assertSat(dumpModel: Boolean = false) = {
       solve match {
         case Unsat(reason) =>
           fail(s"Unexpectedly unsat: $reason\n" + solver.dumpTerms())
-        case _ => // Ok
+        case Sat(model) => // Ok
+          if (dumpModel) {
+            println(s"Model:")
+//            for (terms <- model; termsSorted = terms.sortBy(solver.termNiceness(_)) if terms.size > 1)
+//              println(s"\t${termsSorted.mkString(" = ")}")
+            for ((lblOption, terms) <- model; termsSorted = terms.sortBy(solver.termNiceness))
+              println(s"\t$lblOption | ${termsSorted.mkString(" = ")}")
+          }
       }
       checkSplitting()
     }
     def assertUnsat() = {
       solve match {
-        case Sat() => fail(s"Unexpectedly sat")
+        case Sat(_) => fail(s"Unexpectedly sat")
         case _ => // Ok
       }
       checkSplitting()
     }
     def assertUnsatDueTo[T <: UnsatReason]()(implicit ev: ClassTag[T]) = {
       solve match {
-        case Sat() => fail(s"Unexpectedly sat")
+        case Sat(_) => fail(s"Unexpectedly sat")
         case Unsat(_: T) => // Ok
         case Unsat(reason) => fail(s"Expected unsat due to $ev, instead got $reason")
       }
@@ -81,6 +88,22 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     val sigList = Seq(Seq(0,1), Seq()) // Cons(Fin, List), Nil
     val sigListDts = Seq(Seq(Nil, Nil), Seq())
     override val sig = Signature(Seq(sigFin, sigList), Seq(sigFinDts, sigListDts))
+  }
+  trait SIntAndIntListSig extends FreshSolver {
+    def Succ(pred: Term) = Constructor(0,0,List(pred))
+    val Zero = Constructor(0,1,List())
+    def Pred(succ: Term) = Selector(0,0,0,succ)
+
+    def Cons(h: Term, t:Term) = Constructor(1,0,List(h,t))
+    val Nil = Constructor(1,1,List())
+    def Head(cons: Term) = Selector(1,0,0,cons)
+    def Tail(cons: Term) = Selector(1,0,1,cons)
+
+    val sigSInt = Seq(Seq(0), Seq()) // Succ(SInt), Zero
+    val sigSIntDts = Seq(Seq(Zero), Seq())
+    val sigList = Seq(Seq(0,1), Seq()) // Cons(SInt, List), Nil
+    val sigListDts = Seq(Seq(Zero, Nil), Seq())
+    override val sig = Signature(Seq(sigSInt, sigList), Seq(sigSIntDts, sigListDts))
   }
 
   before {
@@ -229,7 +252,7 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
   }
 
   it should "return unsat on degenerate cyclic list example" in new FiniteAndListSig {
-    solver.debugOn
+//    solver.debugOn
     override val expectSplitting = Some(true)
     val x = Variable(1)
     val z = Variable(3)
@@ -244,5 +267,16 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
   }
 
   // TODO: Test case to check Instantiate 2 rule
+
+
+  it should "return sat on our sample for branching" in new SIntAndIntListSig {
+    solver.debugOn
+    val x = Variable(1)
+    val m = Variable(2)
+    val y = Variable(3)
+    override val eqs = Seq( (x, Cons(m, y)) )
+    override val ineqs = Seq( (m, Zero), (Head(y), Zero) )
+    assertSat(true)
+  }
 
 }
