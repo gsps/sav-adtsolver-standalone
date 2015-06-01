@@ -263,7 +263,7 @@ class AdtSolverSpec extends FlatSpec with BeforeAndAfter {
     }
     override val eqs = Seq( (TailN(2,z), x), (z, x) )
     override val tests = Seq( Tester(1,0,z) )
-    assertUnsatDueTo[Cyclic]()
+    assertUnsat()
   }
 
   // TODO: Test case to check Instantiate 2 rule

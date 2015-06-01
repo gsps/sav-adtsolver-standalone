@@ -116,6 +116,7 @@ case class Tester(sort: SortRef, ctor: CtorRef, arg: Term)
 
 abstract class Result
 case class Sat(model: Seq[(Option[(SortRef, CtorRef)], Seq[Term])]) extends Result
+// NOTE: The UnsatReason is only meaningful when no splitting was required.
 case class Unsat(reason: UnsatReason) extends Result
 
 abstract class UnsatReason
